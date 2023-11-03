@@ -13,6 +13,10 @@ Parameters:
   CognitoCustomSMSSenderTestingSNSTopicSubscriber:
     Type: String
     Description: "Provide a valid email address where all SMS messages will be sent instead of through SMS"
+  SMSSenderWebHookHost:
+    Type: String
+  SMSSenderWebHookPath:
+    Type: String
   CognitoUserPoolId:
     Type: String
     Description: "Provide the Id of an existing Cognito user pool that you want to integrate Lambda-based SMS messaging with"
@@ -270,7 +274,7 @@ Resources:
 
               # plain_text_code now has the decrypted secret
               plain_text_code = decrypt(base64.b64decode(event["request"]["code"]))
-              message = "Code from the Cognito Lambda-based SMS messaging testing stack is: " + plain_text_code
+              message = "Verification code for " + event["request"]["userAttributes"]["phone_number"] + " is: " + plain_text_code
 
               # Publish to a SNS topic to simulate custom SMS messaging
               sns_client = boto3.client("sns")
@@ -673,15 +677,76 @@ Resources:
       LogGroupName:
         Fn::Sub: /aws/lambda/CogTestingHelper-${AWS::StackName}
       RetentionInDays: 30
+
+  CognitoCustomSMSSenderTestingWebHookLambda:
+    Type: AWS::Lambda::Function
+    DependsOn: CognitoCustomSMSSenderTestingLambdaHelperLogGroup
+    Properties:
+      Description: "A Lambda function that sends webhook to e.g. MSTeams"
+      FunctionName:
+        Fn::Sub: CogTestingWebHook-${AWS::StackName}
+      Handler: index.handler
+      Role:
+        Fn::GetAtt:
+          - CognitoCustomSMSSenderTestingWebHookRole
+          - Arn
+      Runtime: python3.9
+      MemorySize: 1024
+      Timeout: 30
+      Environment:
+        Variables:
+          WEBHOOK_HOST: !Ref SMSSenderWebHookHost
+          WEBHOOK_PATH: !Ref SMSSenderWebHookPath
+      Code:
+        ZipFile: |
+          import json
+          import os
+          def lambda_handler(event, context):
+              import http.client
+              import json
+              
+              host = os.environ["WEBHOOK_HOST"]
+              path = os.environ["WEBHOOK_PATH"]
+              
+              conn = http.client.HTTPSConnection(host)
+              payload = json.dumps({
+                "text": event['Records'][0]['Sns']['Message']
+              })
+              headers = {
+                'Content-Type': 'application/json'
+              }
+              conn.request("POST", path, payload, headers)
+              res = conn.getresponse()
+              data = res.read()
+
+              return {
+                  'statusCode': 200,
+              }
+
+  CognitoCustomSMSSenderTestingWebHookRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "The IAM role that is created for helper Lambda function executions in the Cognito user pool Lambda-based SMS messaging testing stack"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - "AWSLambdaBasicExecutionRole"
+
   CognitoCustomSMSSenderTestingLambdaSNSTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName:
         Fn::Sub: CognitoCustomSMSSenderTestingLambdaSNSTopic-${AWS::StackName}
       Subscription:
-        - Endpoint:
-            Fn::Sub: ${CognitoCustomSMSSenderTestingSNSTopicSubscriber}
-          Protocol: "email"
+        - Endpoint: !GetAtt CognitoCustomSMSSenderTestingWebHookLambda.Arn
+          Protocol: "lambda"
       KmsMasterKeyId:
         Fn::If:
           - OptInSNSTopicEncryption
